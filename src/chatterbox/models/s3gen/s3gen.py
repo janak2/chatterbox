@@ -412,7 +412,8 @@ class S3Token2Wav(S3Token2Mel):
         self.hift_cache_dict = {'mel': output_mels[:, :, -self.mel_cache_len:],
                                         'source': output_sources[:, :, -self.source_cache_len:],
                                         'speech': output_wavs[:, -self.source_cache_len:]}
-        output_wavs = output_wavs[:, :-self.source_cache_len]
+        
+        output_wavs = output_wavs[:, :-self.source_cache_len] if not finalize else output_wavs
 
         # # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         # output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
