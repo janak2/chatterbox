@@ -257,6 +257,12 @@ class S3Token2Wav(S3Token2Mel):
         trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
         self.register_buffer("trim_fade", trim_fade, persistent=False) # (buffers get automatic device casting)
         self.estimator_dtype = "fp32"
+        self.hift_cache_dict = None
+        self.mel_cache_len = 8
+
+        # TODO: check that 480 is correct
+        self.source_cache_len = int(self.mel_cache_len * 480)
+        self.speech_window = np.hamming(2 * self.source_cache_len)
 
     def forward(
         self,
@@ -376,6 +382,7 @@ class S3Token2Wav(S3Token2Mel):
         n_cfm_timesteps=None,
         speech_token_lens=None,
         finalize=False,
+        token_offset=0,
     ):
         # hallucination prevention, drop special tokens
         # if drop_invalid_tokens:
@@ -391,9 +398,37 @@ class S3Token2Wav(S3Token2Mel):
             finalize=finalize,
         )
         output_mels = output_mels.to(dtype=self.dtype) # FIXME (fp16 mode) is this still needed?
-        output_wavs, output_sources = self.hift_inference(output_mels, None)
+        output_mels = output_mels[:, :, token_offset * self.flow.token_mel_ratio:]
 
-        # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
-        output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
+        if self.hift_cache_dict is not None:
+            hift_cache_mel, hift_cache_source = self.hift_cache_dict['mel'], self.hift_cache_dict['source']
+            output_mels = torch.concat([hift_cache_mel, output_mels], dim=2)
+        else:
+            hift_cache_source = None
+
+        output_wavs, output_sources = self.hift_inference(output_mels, hift_cache_source)
+        if self.hift_cache_dict is not None:
+            output_wavs = self._fade_in_out(output_wavs, self.hift_cache_dict['speech'], self.speech_window)
+        self.hift_cache_dict = {'mel': output_mels[:, :, -self.mel_cache_len:],
+                                        'source': output_sources[:, :, -self.source_cache_len:],
+                                        'speech': output_wavs[:, -self.source_cache_len:]}
+        output_wavs = output_wavs[:, :-self.source_cache_len]
+
+        # # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
+        # output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
+
+        if finalize:
+            self.hift_cache_dict = None
 
         return output_wavs, output_sources
+
+
+    def _fade_in_out(self, fade_in_mel, fade_out_mel, window):
+        device = fade_in_mel.device
+        fade_in_mel, fade_out_mel = fade_in_mel.cpu(), fade_out_mel.cpu()
+        mel_overlap_len = int(window.shape[0] / 2)
+        if fade_in_mel.device == torch.device('cpu'):
+            fade_in_mel = fade_in_mel.clone()
+        fade_in_mel[..., :mel_overlap_len] = fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len] + \
+            fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
+        return fade_in_mel.to(device)

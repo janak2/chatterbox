@@ -7,7 +7,7 @@ import perth
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
-
+import numpy as np
 from .models.t3 import T3
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
 from .models.s3gen import S3GEN_SR, S3Gen
@@ -282,6 +282,7 @@ class ChatterboxTTS:
         exaggeration=0.5,
         cfg_weight=0.5,
         temperature=0.8,
+        chunk_size_seconds=1,
     ):
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
@@ -309,6 +310,15 @@ class ChatterboxTTS:
         text_tokens = F.pad(text_tokens, (1, 0), value=sot)
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
+        input_frame_rate = self.s3gen.flow.input_frame_rate
+        token_hop_len = chunk_size_seconds * input_frame_rate
+        max_token_hop_len = 4 * token_hop_len
+        stream_scale_factor = 2
+        flow_prompt_speech_token = self.conds.gen['prompt_token']
+        prompt_token_pad = int(np.ceil(flow_prompt_speech_token.shape[1] / token_hop_len) * token_hop_len - flow_prompt_speech_token.shape[1])
+        token_offset = 0
+
+
         with torch.inference_mode():
             speech_tokens_buffer = []
             wav_buffer = []
@@ -323,6 +333,8 @@ class ChatterboxTTS:
                 min_p=min_p,
                 top_p=top_p,
             ):
+                this_token_hop_len = token_hop_len + prompt_token_pad if token_offset == 0 else token_hop_len
+
                 if speech_token is None:
                     finalized = True
 
@@ -331,12 +343,11 @@ class ChatterboxTTS:
                 else:
                     speech_tokens_buffer.append(speech_token) # shape: (B, 1)
 
-                    if len(speech_tokens_buffer) < 10:
+                    if len(speech_tokens_buffer) < token_offset + this_token_hop_len + self.s3gen.flow.pre_lookahead_len:
                         continue  
 
                 # Extract only the conditional batch.
-                speech_tokens = torch.cat(speech_tokens_buffer, dim=1)[0] # shape: (num_tokens)
-                speech_tokens_buffer = []
+                speech_tokens = torch.cat(speech_tokens_buffer[:token_offset + this_token_hop_len + self.s3gen.flow.pre_lookahead_len], dim=1)[0] # shape: (num_tokens)
 
                 # TODO: output becomes 1D
                 speech_tokens = drop_invalid_tokens(speech_tokens)
@@ -348,8 +359,12 @@ class ChatterboxTTS:
                 wav, _ = self.s3gen.inference_streaming(
                     speech_tokens=speech_tokens,
                     ref_dict=self.conds.gen,
-                    finalize=True,
+                    finalize=finalized,
+                    token_offset=token_offset,
                 )
+                token_offset += this_token_hop_len
+                token_hop_len = min(max_token_hop_len, token_hop_len * stream_scale_factor)
+
                 wav_buffer.append(wav)
 
             wav = torch.cat(wav_buffer, dim=1).cpu()
