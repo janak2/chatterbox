@@ -365,8 +365,4 @@ class ChatterboxTTS:
                 token_offset += this_token_hop_len
                 token_hop_len = min(max_token_hop_len, token_hop_len * stream_scale_factor)
 
-                wav_buffer.append(wav)
-
-            wav = torch.cat(wav_buffer, dim=1).cpu()
-        return wav
-
+                yield wav.detach().cpu()

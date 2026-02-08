@@ -19,9 +19,17 @@ text = "Ezreal and Jinx teamed up with Ahri, Yasuo, and Teemo to take down the e
 # wav = model.generate(text)
 # ta.save("non_streaming.wav", wav, model.sr)
 start_time = time.time()
-wav = model.generate_streaming(text)
+chunk_count = 0
+wav_buffer = []
+for wav in model.generate_streaming(text):
+    chunk_count += 1
+    wav_buffer.append(wav)
+    print(f"Received chunk {chunk_count}, shape: {wav.shape}, duration: {wav.shape[-1] / model.sr:.3f}s")
+wav = torch.cat(wav_buffer, dim=-1)
 end_time = time.time()
+
 print(f"Total generation time: {end_time - start_time:.3f}s")
 print(f"RTF: {(end_time - start_time) / (wav.shape[-1] / model.sr):.3f}")
 print(f"Total audio duration: {wav.shape[-1] / model.sr:.3f}s")
+
 ta.save("streaming.wav", wav, model.sr)
